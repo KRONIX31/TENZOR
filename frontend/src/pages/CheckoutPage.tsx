@@ -49,7 +49,7 @@ export function CheckoutPage() {
     finally { setQuoting(false); }
   }, [clearUnavailable, items, markUnavailableFromError]);
   useEffect(() => { void quoteOrder(); }, [basketSignature]);
-  if (!lines.length) return <section><p className="eyebrow">Оформление</p><h1>Корзина пуста</h1><Empty>Сначала добавьте хотя бы одну конфигурацию.</Empty><Link className="button" to="/">В каталог</Link></section>;
+  if (!lines.length) return <section><p className="eyebrow">Оформление</p><h1>Корзина пуста</h1><Empty>Сначала добавьте хотя бы одну конфигурацию.</Empty><div className="empty-actions"><Link className="button" to="/">В каталог</Link></div></section>;
   const serverFields = fieldErrors(createError ?? quoteError);
   const errors = { ...serverFields, ...localErrors };
   const submit = async () => {
