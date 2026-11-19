@@ -7,8 +7,37 @@
 * **Core:** React 19, TypeScript 5.8, Vite 7
 * **Routing:** React Router 7
 * **Tests:** Vitest
+* **Deploy:** Docker (multi-stage: Node 22 → nginx)
 
 ## Быстрый старт
+
+### Вариант 1. Через Docker
+
+Требуется **Docker** с плагином **Compose v2**. Бэкенд должен быть запущен отдельно на хосте и доступен на порту `8000` (`http://localhost:8000/api/v1`).
+
+Браузер обращается к API по относительному адресу `/api/v1` на том же origin, а nginx внутри контейнера проксирует эти запросы на бэкенд (`http://host.docker.internal:8000`). Настройка CORS на бэкенде не требуется.
+
+1. Создайте файл окружения:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. При необходимости измените значения в `.env` (см. [Переменные окружения](#переменные-окружения)).
+
+3. Убедитесь, что бэкенд слушает `0.0.0.0:8000`, а не только `127.0.0.1` (для uvicorn — `--host 0.0.0.0`), иначе контейнер не сможет до него достучаться.
+
+4. Соберите и запустите контейнер:
+   ```bash
+   docker compose up --build
+   ```
+
+5. Откройте приложение: `http://localhost:3000`.
+
+Остановка: `docker compose down`.
+
+> **Важно:** `VITE_API_URL` вшивается в JS-бандл на этапе сборки. После его изменения пересоберите образ: `docker compose up --build`. Адрес бэкенда для проксирования задан в `nginx.conf` (`proxy_pass`), его изменение тоже требует пересборки.
+
+### Вариант 2. Локально (Node.js)
 
 Требуется **Node.js >= 20** и **npm >= 10**.
 
@@ -21,6 +50,7 @@
    ```bash
    cp .env.example .env.local
    ```
+   Значение `VITE_API_URL=/api/v1` совпадает со значением по умолчанию, поэтому запросы идут через встроенный прокси dev-сервера (`/api/v1` → `http://localhost:8000`), а настройка CORS на бэкенде не нужна.
 
 3. Запустите dev-сервер (по умолчанию поднимется на `http://localhost:5173`):
    ```bash
@@ -38,11 +68,23 @@
 
 ## Переменные окружения
 
-Конфигурация задаётся через `.env.local` (не коммитится в Git) или переменные окружения на этапе сборки:
+Конфигурация задаётся через `.env` (для Docker Compose), `.env.local` (для локальной разработки) или переменные окружения на этапе сборки. Файлы `.env` и `.env.local` не коммитятся в Git, в репозитории хранится только `.env.example`. Vite подхватывает `.env` и при `npm run dev`.
 
 | Переменная | По умолчанию | Описание |
 | :--- | :--- | :--- |
-| `VITE_API_URL` | `/api/v1` | Базовый URL REST API. Для локальной разработки без прокси укажите адрес бэкенда, например `http://localhost:8000/api/v1`. |
+| `VITE_API_URL` | `/api/v1` | Базовый URL REST API, который использует браузер. Относительное значение `/api/v1` означает «тот же origin», запросы проксируются (Vite в разработке, nginx в Docker). Абсолютный адрес (например `https://api.example.com/api/v1`) отправляет запросы напрямую и требует CORS на бэкенде. Значение вшивается в бандл при сборке. |
+| `FRONTEND_PORT` | `3000` | Порт на хосте, на котором Docker публикует фронтенд. Используется только `docker-compose.yml`. |
+
+### Как запросы доходят до бэкенда
+
+| Режим | Откуда страница | Путь запроса |
+| :--- | :--- | :--- |
+| `npm run dev` | `http://localhost:5173` | Браузер → прокси Vite (`vite.config.ts`) → `http://localhost:8000` |
+| Docker | `http://localhost:3000` | Браузер → nginx (`nginx.conf`) → `http://host.docker.internal:8000` |
+
+В обоих случаях браузер видит один origin, поэтому CORS не нужен.
+
+Если задать `VITE_API_URL` абсолютным адресом, запросы пойдут напрямую на бэкенд в обход прокси. Тогда на бэкенде должен быть разрешён CORS для origin фронтенда, включая заголовки `Authorization`, `Content-Type` и `Idempotency-Key`.
 
 ## Архитектура и ключевые решения
 
@@ -54,6 +96,10 @@
 ## Структура проекта
 
 ```text
+Dockerfile          # Multi-stage сборка: Node (build) → nginx (serve)
+docker-compose.yml  # Запуск контейнера, передача VITE_API_URL в сборку, extra_hosts
+nginx.conf          # Раздача статики, SPA-fallback и проксирование /api/v1 на бэкенд
+.env.example        # Шаблон переменных окружения
 src/
 ├── api/          # HTTP-клиент (fetch-обёртка), эндпоинты и управление токеном в памяти
 ├── components/   # Layout, роутинг по ролям, UI-состояния и переиспользуемые блоки
@@ -66,4 +112,46 @@ src/
 
 ## Деплой
 
-Приложение собирается в набор статических файлов (`npm run build` -> `dist/`). Для корректной работы клиентского роутинга веб-сервер (Nginx, Caddy и др.) должен отдавать `index.html` на все неизвестные маршруты (fallback) и проксировать `/api/v1` на бэкенд.
+Приложение собирается в набор статических файлов (`npm run build` -> `dist/`).
+
+### Docker
+
+`Dockerfile` собирает бандл в образе Node и копирует `dist/` в образ nginx. `nginx.conf`:
+
+* отдаёт `index.html` на все неизвестные маршруты (SPA-fallback);
+* кэширует хэшированные файлы из `/assets/`;
+* проксирует `/api/v1/` на бэкенд:
+
+  ```nginx
+  location /api/v1/ {
+      proxy_pass http://host.docker.internal:8000;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+  ```
+
+Имя `host.docker.internal` в Docker Desktop (Windows/macOS) доступно по умолчанию. На Linux его нужно объявить, поэтому в `docker-compose.yml` указано:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+Требования на сервере:
+
+* бэкенд слушает `0.0.0.0:8000`, порт при этом не нужно открывать в интернет;
+* если включён файрвол (например `ufw`), разрешён трафик из docker-сети на порт `8000`;
+* для публичного доступа перед контейнером ставится reverse proxy с HTTPS (Caddy, Traefik, nginx), а порт можно привязать к loopback: `"127.0.0.1:3000:80"`.
+
+Проверка:
+
+```bash
+docker compose up --build -d
+curl "http://localhost:3000/api/v1/products?page=1&page_size=12"
+```
+
+Ответ `502 Bad Gateway` означает, что nginx не достучался до бэкенда. Подробности: `docker compose logs frontend`.
+
+Если бэкенд работает в другом месте (тот же compose, другая docker-сеть, отдельный сервер), замените адрес в `proxy_pass` в `nginx.conf` и пересоберите образ.

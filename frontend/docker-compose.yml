@@ -1,0 +1,13 @@
+services:
+  frontend:
+    build:
+      context: .
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api/v1}
+    image: konditerskaya-frontend
+    container_name: konditerskaya-frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
